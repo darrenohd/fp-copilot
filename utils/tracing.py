@@ -13,10 +13,14 @@ def initialize_tracer():
     # Initialize OpenAI instrumentation
     OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
     
-    # Set environment variables for Phoenix
-    os.environ["PHOENIX_API_KEY"] = "f320c64dbf1666453f7:7519083"
+    # Set environment variables for Phoenix if not already set
+    if not os.environ.get("PHOENIX_API_KEY"):
+        raise EnvironmentError("PHOENIX_API_KEY environment variable is not set")
+    
     os.environ["PHOENIX_CLIENT_HEADERS"] = f"api_key={os.environ['PHOENIX_API_KEY']}"
-    os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = "https://app.phoenix.arize.com"
+    
+    if not os.environ.get("PHOENIX_COLLECTOR_ENDPOINT"):
+        os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = "https://app.phoenix.arize.com"
     
     return tracer_provider
 
