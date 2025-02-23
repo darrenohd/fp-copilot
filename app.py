@@ -1,106 +1,157 @@
 import streamlit as st
 from dotenv import load_dotenv
+from agents.web_scraper import ProductScraper
 from agents.document_processor import DocumentProcessor
-from agents.product_positioning import ProductPositioningAgent
-from agents.tools_manager import PositioningTools
+from agents.positioning_generator import PositioningGenerator
 from utils.vector_store import VectorStoreManager
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from agents.web_scraper import WebScraper
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from utils.slack import SlackManager
+from agents.positioning_agent import PositioningAgent
+from agents.scraping_agent import ScrapingAgent
+from utils.tracing import initialize_tracer
 
 load_dotenv()
 
-st.title("Product Positioning Assistant")
+# Set page configuration
+st.set_page_config(layout="wide")
+
+# Initialize tracer
+tracer_provider = initialize_tracer()
+
+st.title("Feature Positioning Copilot")
 
 # Initialize components
 vector_store = VectorStoreManager.initialize()
-doc_processor = DocumentProcessor(vector_store)
-positioning_agent = ProductPositioningAgent(vector_store)
-tools_manager = PositioningTools(positioning_agent)
+product_scraper = ProductScraper(vector_store)
+document_processor = DocumentProcessor(vector_store)
+positioning_generator = PositioningGenerator(vector_store)
+slack_manager = SlackManager()
 
-# File upload section
-with st.sidebar:
-    st.header("Document Sources")
-    st.write("Upload documents to analyze for positioning insights:")
-    
-    uploaded_files = st.file_uploader(
-        "Upload Documents", 
-        type=["pdf", "csv", "txt"],
-        accept_multiple_files=True
-    )
+# Initialize agents
+positioning_agent = PositioningAgent(vector_store)
+scraping_agent = ScrapingAgent(vector_store)
 
-    if uploaded_files:
-        for doc in uploaded_files:
-            with st.spinner(f'Processing {doc.name}...'):
-                doc_processor.process_file(doc)
-
-# Initialize chat history
+# Initialize session states
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    initial_message = """I'm your product positioning assistant. I can help you analyze your product positioning using these tools:
-    
-    {}
-    
-    How can I help you today?""".format(tools_manager.get_tool_descriptions())
-    
-    st.session_state.messages.append(SystemMessage(content=initial_message))
+    st.session_state.current_analysis = None
+    st.session_state.show_examples = True
 
-# Display chat messages
-for message in st.session_state.messages:
-    if isinstance(message, HumanMessage):
-        with st.chat_message("user"):
-            st.markdown(message.content)
-    elif isinstance(message, AIMessage):
-        with st.chat_message("assistant"):
-            st.markdown(message.content)
-    elif isinstance(message, SystemMessage):
-        with st.chat_message("assistant"):
-            st.markdown(message.content)
+# Add helper text in main area
+st.markdown("""
+### 👋 Welcome to your Feature Positioning Copilot!
 
-# Chat input
-prompt = st.chat_input("How can I help you with product positioning?")
+Here's what you can do:
+1. 📄 Upload product documents in the Context Hub (sidebar)
+2. 💬 Ask questions about your product, competitors, and market
+3. 🎯 Get positioning recommendations
+4. 📊 Share insights to Slack
+""")
 
-if prompt:
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        st.session_state.messages.append(HumanMessage(content=prompt))
+# Sidebar for document uploads
+with st.sidebar:
+    st.header("📚 Context Hub")
     
-    # Process the command and execute appropriate tool
-    with st.chat_message("assistant"):
-        with st.spinner("Processing..."):
-            # Here you would add logic to parse the prompt and determine which tool to use
-            # For now, we'll use a simple string matching approach
-            if "market fit" in prompt.lower():
-                result = tools_manager.execute_tool("analyze_market_fit")
-            elif "value prop" in prompt.lower():
-                result = tools_manager.execute_tool("extract_value_props")
-            elif "competitive" in prompt.lower():
-                st.text_input_container = st.empty()
-                competitor_url = st.text_input("Please provide the competitor's website URL:")
-                
-                if competitor_url:
-                    with st.spinner("Analyzing competitor website..."):
-                        # Initialize web scraper
-                        scraper = WebScraper()
-                        competitor_data = scraper.scrape_website(competitor_url)
-                        
-                        # Add to vector store for analysis
-                        doc_processor.process_text(
-                            text=competitor_data['main_content'],
-                            metadata={'source': competitor_url}
-                        )
-                        
-                        # Run competitive analysis
-                        result = tools_manager.execute_tool(
-                            "analyze_competitive_position",
-                            competitor_url=competitor_url
-                        )
+    # Feature Information Section
+    with st.expander("Feature Information", expanded=True):
+        st.subheader("Basic Details")
+        feature_name = st.text_input("Feature Name", key="feature_name")
+        release_date = st.date_input("Target Release Date", key="release_date")
+        
+        if all([feature_name, release_date]):
+            st.session_state.feature_info = {
+                "name": feature_name,
+                "release_date": release_date
+            }
+    
+    # Requirements Section
+    with st.expander("Requirements", expanded=False):
+        st.subheader("Product Requirements")
+        requirements_file = st.file_uploader("Upload Product Requirements", type=['txt', 'pdf'], key="req_upload")
+        if requirements_file and st.button("Process Requirements", key="req_button"):
+            with st.spinner("Processing requirements document..."):
+                document_processor.process_file(requirements_file, "requirements")
+                st.success("Requirements processed!")
+    
+    # User Interviews Section
+    with st.expander("User Research", expanded=False):
+        st.subheader("User Interviews")
+        interviews_file = st.file_uploader("Upload User Interviews", type=['txt', 'pdf'], key="int_upload")
+        if interviews_file and st.button("Process Interviews", key="int_button"):
+            with st.spinner("Processing interviews..."):
+                document_processor.process_file(interviews_file, "interviews")
+                st.success("Interviews processed!")
+    
+    # Competitor Analysis Section
+    with st.expander("Competitor Analysis", expanded=False):
+        st.subheader("Competitor URLs")
+        competitor_url = st.text_input("Enter competitor URL")
+        if competitor_url and st.button("Analyze Competitor", key="comp_button"):
+            with st.spinner("Analyzing competitor..."):
+                analysis = product_scraper.analyze_product_page(competitor_url)
+                if isinstance(analysis, str):
+                    st.error(analysis)
                 else:
-                    result = "Please provide a competitor's website URL to analyze."
-            elif "positioning statement" in prompt.lower():
-                # Extract parameters from prompt or ask for them
-                result = "Please provide target segment and key benefits for generating a positioning statement."
+                    document_processor.process_competitor(analysis)
+                    st.success("Competitor analyzed and stored!")
+
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Only show example buttons if no messages yet
+if st.session_state.show_examples and len(st.session_state.messages) == 0:
+    st.write("Try these example questions:")
+    container = st.container()
+    with container:
+        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
+        with col1:
+            if st.button("Generate a positioning statement", use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": "Generate a positioning statement for our product"})
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        positioning = positioning_generator.generate_positioning()
+                        st.markdown(positioning)
+                st.session_state.messages.append({"role": "assistant", "content": positioning})
+                st.session_state.show_examples = False
+                st.rerun()
+
+# Chat input at the bottom
+if prompt := st.chat_input("Ask me anything about the analyzed products and documents"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            if "share to slack" in prompt.lower() or "share this to slack" in prompt.lower():
+                if len(st.session_state.messages) > 1:
+                    last_message = st.session_state.messages[-2]["content"]
+                    success, message = slack_manager.share_message(last_message)
+                    response = "✅ " + message if success else "❌ " + message
+                else:
+                    response = "❌ No previous message to share!"
+            elif "positioning" in prompt.lower():
+                positioning = positioning_generator.generate_positioning()
+                response = positioning
             else:
-                result = f"I can help you with the following tools:\n{tools_manager.get_tool_descriptions()}"
+                results = vector_store.similarity_search(prompt, k=5)
+                context = "\n".join([doc.page_content for doc in results])
+                system_prompt = """You are a helpful product analysis assistant. Using the provided context, answer the user's question clearly and concisely. 
+                If the information is not available in the context, say so. Format your response using markdown for better readability."""
+                
+                human_prompt = f"Context from knowledge base:\n{context}\n\nUser question: {prompt}"
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=human_prompt)
+                ]
+                response = ChatOpenAI(model="gpt-4", temperature=0.7).invoke(messages).content
             
-            st.markdown(result)
-            st.session_state.messages.append(AIMessage(content=result)) 
+            st.markdown(response)
+            st.markdown("""
+            What would you like to do next?
+            - Generate another positioning statement
+            - Analyze competitor positioning
+            - Share insights to Slack
+            - Upload more documents
+            """)
+        st.session_state.messages.append({"role": "assistant", "content": response}) 
