@@ -1,0 +1,24 @@
+# Documents
+*.pdf
+*.doc
+*.docx
+*.txt
+*.rtf
+*.odt
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+
+# Python virtual environments
+venv/
+env/
+.env/
+.venv/
+ENV/
+virtualenv/
+
+# Environment files
+.env
+.env.local
+.env.*
