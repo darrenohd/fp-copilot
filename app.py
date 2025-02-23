@@ -14,7 +14,11 @@ from utils.tracing import initialize_tracer
 load_dotenv()
 
 # Set page configuration
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="FPC | Feature Positioning Copilot",
+    page_icon="🎯",
+    layout="wide"
+)
 
 # Initialize tracer
 tracer_provider = initialize_tracer()
