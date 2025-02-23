@@ -8,4 +8,17 @@ class DocumentRetriever:
 
     def get_relevant_context(self, query):
         docs = self.retriever.invoke(query)
-        return "".join(d.page_content for d in docs) 
+        context = []
+        sources = []
+        
+        for doc in docs:
+            context.append(doc.page_content)
+            sources.append({
+                'file': doc.metadata.get('source', 'Unknown'),
+                'page': doc.metadata.get('page', 'Unknown')
+            })
+            
+        return {
+            'context': "\n".join(context),
+            'sources': sources
+        } 

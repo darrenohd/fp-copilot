@@ -1,4 +1,8 @@
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    CSVLoader
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import tempfile
 import os
@@ -12,6 +16,14 @@ class DocumentProcessor:
             length_function=len,
             is_separator_regex=False,
         )
+        self._loaders = {
+            'pdf': PyPDFLoader,
+            'txt': TextLoader,
+            'csv': CSVLoader
+        }
+
+    def get_supported_formats(self):
+        return list(self._loaders.keys())
 
     def process_file(self, uploaded_file):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
@@ -26,4 +38,13 @@ class DocumentProcessor:
             self.vector_store.add_documents(documents=documents, ids=uuids)
             return True
         finally:
-            os.unlink(tmp_file_path) 
+            os.unlink(tmp_file_path)
+
+    def process_text(self, text, metadata=None):
+        if metadata is None:
+            metadata = {}
+        
+        documents = self.text_splitter.create_documents([text], metadatas=[metadata])
+        uuids = [f"id{i}" for i in range(len(documents))]
+        self.vector_store.add_documents(documents=documents, ids=uuids)
+        return True 
