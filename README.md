@@ -6,10 +6,8 @@ An intelligent AI-powered system for analyzing and generating product positionin
 - **Feature-based positioning analysis** with GPT-4  
 - **Context-aware recommendations** using Pinecone  
 - **Automated competitor analysis** via web scraping  
-- **Document processing** for product requirements & user research  
-- **Streamlit-based UI** for easy interaction  
+- **Document processing** for product requirements & user research
 - **Slack integration** for sharing insights  
-- **OpenTelemetry support** for observability  
 
 ## 📌 Getting Started  
 
