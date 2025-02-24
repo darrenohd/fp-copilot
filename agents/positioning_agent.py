@@ -36,5 +36,4 @@ class PositioningAgent(BaseAgent):
             'name': 'Unnamed Feature',
             'release_date': 'TBD'
         })
-        
-    # Rest of your existing _get methods... 
+    
