@@ -25,8 +25,6 @@ class SlackManager:
                 formatted_message = f"""🚀 *Product Analysis for {feature_name}*
 
 📊 *Analysis Summary*
-{message.split('What would you like to do next?')[0].strip()}
-
 💡 *Shared via Feature Positioning Copilot*"""
 
                 response = self.client.chat_postMessage(

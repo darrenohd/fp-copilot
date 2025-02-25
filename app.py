@@ -1,8 +1,6 @@
 import streamlit as st
 from dotenv import load_dotenv
-from agents.web_scraper import ProductScraper
 from agents.document_processor import DocumentProcessor
-from agents.positioning_generator import PositioningGenerator
 from utils.vector_store import VectorStoreManager
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
@@ -27,9 +25,7 @@ st.title("Feature Positioning Copilot")
 
 # Initialize components
 vector_store = VectorStoreManager.initialize()
-product_scraper = ProductScraper(vector_store)
 document_processor = DocumentProcessor(vector_store)
-positioning_generator = PositioningGenerator(vector_store)
 slack_manager = SlackManager()
 
 # Initialize agents
@@ -93,7 +89,7 @@ with st.sidebar:
         competitor_url = st.text_input("Enter competitor URL")
         if competitor_url and st.button("Analyze Competitor", key="comp_button"):
             with st.spinner("Analyzing competitor..."):
-                analysis = product_scraper.analyze_product_page(competitor_url)
+                analysis = scraping_agent.execute(competitor_url)
                 if isinstance(analysis, str):
                     st.error(analysis)
                 else:
@@ -116,7 +112,7 @@ if st.session_state.show_examples and len(st.session_state.messages) == 0:
                 st.session_state.messages.append({"role": "user", "content": "Generate a positioning statement for our product"})
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking..."):
-                        positioning = positioning_generator.generate_positioning()
+                        positioning = positioning_agent.execute()
                         st.markdown(positioning)
                 st.session_state.messages.append({"role": "assistant", "content": positioning})
                 st.session_state.show_examples = False
@@ -135,7 +131,7 @@ if prompt := st.chat_input("Ask me anything about the analyzed products and docu
                 else:
                     response = "❌ No previous message to share!"
             elif "positioning" in prompt.lower():
-                positioning = positioning_generator.generate_positioning()
+                positioning = positioning_agent.execute()
                 response = positioning
             else:
                 results = vector_store.similarity_search(prompt, k=5)
@@ -151,11 +147,4 @@ if prompt := st.chat_input("Ask me anything about the analyzed products and docu
                 response = ChatOpenAI(model="gpt-4", temperature=0.7).invoke(messages).content
             
             st.markdown(response)
-            st.markdown("""
-            What would you like to do next?
-            - Generate another positioning statement
-            - Analyze competitor positioning
-            - Share insights to Slack
-            - Upload more documents
-            """)
         st.session_state.messages.append({"role": "assistant", "content": response}) 
