@@ -4,10 +4,13 @@ from agents.document_processor import DocumentProcessor
 from utils.vector_store import VectorStoreManager
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from utils.slack import SlackManager
 from agents.positioning_agent import PositioningAgent
 from agents.scraping_agent import ScrapingAgent
+from agents.slack_agent import SlackAgent
 from utils.tracing import initialize_tracer
+from agents.prompts.routing import AGENT_ROUTING_PROMPT
+import re
+import os
 
 load_dotenv()
 
@@ -26,11 +29,11 @@ st.title("Feature Positioning Copilot")
 # Initialize components
 vector_store = VectorStoreManager.initialize()
 document_processor = DocumentProcessor(vector_store)
-slack_manager = SlackManager()
 
 # Initialize agents
 positioning_agent = PositioningAgent(vector_store)
 scraping_agent = ScrapingAgent(vector_store)
+slack_agent = SlackAgent()  # Create the SlackAgent
 
 # Initialize session states
 if "messages" not in st.session_state:
@@ -123,17 +126,40 @@ if prompt := st.chat_input("Ask me anything about the analyzed products and docu
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            if "share to slack" in prompt.lower() or "share this to slack" in prompt.lower():
+            # Determine which agent to use
+            routing_prompt = AGENT_ROUTING_PROMPT.format(user_request=prompt)
+            router = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+            agent_to_use = router.invoke(routing_prompt).content.strip()
+            
+            # Route to appropriate agent
+            if agent_to_use == "SlackAgent" or "share to slack" in prompt.lower():
                 if len(st.session_state.messages) > 1:
                     last_message = st.session_state.messages[-2]["content"]
-                    success, message = slack_manager.share_message(last_message)
+                    success, message = slack_agent.execute(last_message)
                     response = "✅ " + message if success else "❌ " + message
                 else:
                     response = "❌ No previous message to share!"
-            elif "positioning" in prompt.lower():
+            elif agent_to_use == "PositioningAgent":
                 positioning = positioning_agent.execute()
                 response = positioning
-            else:
+            elif agent_to_use == "ScrapingAgent":
+                # Extract URL from prompt
+                url_match = re.search(r'https?://[^\s]+', prompt)
+                if url_match:
+                    url = url_match.group(0)
+                    product_data = scraping_agent.execute(url)
+                    if product_data:
+                        response = f"✅ Successfully analyzed {url}. Here's what I found:\n\n"
+                        response += f"**Product**: {product_data['name']}\n"
+                        response += f"**Description**: {product_data['description']}\n"
+                        response += f"**Pain Points**: {', '.join(product_data['pain_points'])}\n"
+                        response += f"**Pricing**: {product_data['pricing']}\n"
+                        response += f"**Target Audience**: {product_data['target_audience']}\n"
+                    else:
+                        response = f"❌ Failed to analyze {url}. Please try again with a different URL."
+                else:
+                    response = "Please provide a URL to analyze."
+            else:  # RAG
                 results = vector_store.similarity_search(prompt, k=5)
                 context = "\n".join([doc.page_content for doc in results])
                 system_prompt = """You are a helpful product analysis assistant. Using the provided context, answer the user's question clearly and concisely. 
