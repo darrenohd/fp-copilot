@@ -1,26 +1,46 @@
 """
-Main script to run evaluations with Phoenix.
+Main script to run evaluations and log results to Phoenix.
 """
 import json
 import sys
 import os
 import pandas as pd
 from typing import List, Dict, Any
+import uuid
+import time
 
 # Add project root to path so we can import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evals.tool_calling.test_cases import TEST_CASES
+from evals.rag_evaluation.test_cases import RAG_TEST_CASES
 from tools import PositioningTool, ScrapingTool, SlackTool, RAGTool
 
-# Phoenix and related imports
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from openinference.instrumentation.langchain import LangChainInstrumentor
+# Phoenix imports
+from langchain_openai import ChatOpenAI
+import phoenix as px
+from phoenix.trace import SpanEvaluations, DocumentEvaluations
+from utils.tracing import initialize_tracer, create_span
+
+# Set up Phoenix environment variables if not already set
+if not os.environ.get("PHOENIX_API_KEY"):
+    os.environ["PHOENIX_API_KEY"] = input("Enter your Phoenix API key: ")
+    os.environ["PHOENIX_CLIENT_HEADERS"] = f"api_key={os.environ['PHOENIX_API_KEY']}"
+    os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = "https://app.phoenix.arize.com"
+    os.environ["PHOENIX_PROJECT_NAME"] = "feature-positioning-copilot"
 
 # Mock classes for dependencies
 class MockVectorStore:
-    def similarity_search(self, *args, **kwargs):
+    def similarity_search(self, query, k=5):
+        # Return mock documents based on test cases
+        for case in RAG_TEST_CASES:
+            if case["query"] == query:
+                return [MockDocument(doc["content"]) for doc in case["documents"]]
         return []
+
+class MockDocument:
+    def __init__(self, content):
+        self.page_content = content
 
 class MockScrapingService:
     def analyze_website(self, *args, **kwargs):
@@ -50,9 +70,13 @@ def simulate_tool_call(case: Dict[str, Any]) -> Dict[str, Any]:
         "parameters": case["expected_params"]
     }
 
-def run_tool_calling_evals():
-    """Run tool calling evaluations without Phoenix."""
+def run_tool_calling_evals(log_to_phoenix=True):
+    """Run tool calling evaluations and log to Phoenix."""
     print("Running tool calling evaluations...")
+    
+    # Initialize Phoenix tracer
+    if log_to_phoenix:
+        tracer_provider = initialize_tracer()
     
     # Initialize tools with mock dependencies
     mock_vector_store = MockVectorStore()
@@ -66,19 +90,8 @@ def run_tool_calling_evals():
         RAGTool(vector_store=mock_vector_store)
     ]
     
-    # Create dataframe from test cases
-    eval_data = []
-    for case in TEST_CASES:
-        tool_call = simulate_tool_call(case)
-        eval_data.append({
-            "question": case["question"],
-            "tool_call": json.dumps(tool_call, indent=2),
-        })
-    
-    df = pd.DataFrame(eval_data)
-    
-    # Initialize evaluator
-    evaluator = ChatOpenAI(model="gpt-4", temperature=0)
+    # Format tool definitions
+    json_tools = format_tool_definitions(tools)
     
     # Custom tool calling prompt template
     TOOL_CALLING_PROMPT_TEMPLATE = """
@@ -110,33 +123,80 @@ def run_tool_calling_evals():
         [Tool Definitions]: {tool_definitions}
     """
     
-    # Format tool definitions
-    json_tools = format_tool_definitions(tools)
+    # Initialize evaluator
+    evaluator = ChatOpenAI(model="gpt-4", temperature=0)
+    
+    # Create dataframe from test cases
+    eval_data = []
+    span_ids = []
+    
+    for case in TEST_CASES:
+        tool_call = simulate_tool_call(case)
+        eval_data.append({
+            "question": case["question"],
+            "tool_call": json.dumps(tool_call, indent=2),
+        })
+    
+    df = pd.DataFrame(eval_data)
     
     # Run evaluations
     results = []
+    
     for idx, row in df.iterrows():
         print(f"Evaluating test case {idx+1}/{len(df)}...")
         
-        prompt = TOOL_CALLING_PROMPT_TEMPLATE.format(
-            question=row["question"],
-            tool_call=row["tool_call"],
-            tool_definitions=json_tools
-        )
-        
-        response = evaluator.invoke(prompt)
-        result = response.content.strip().lower()
-        
-        # Validate response
-        if result not in ["correct", "incorrect"]:
-            print(f"Warning: Invalid evaluation result: {result}, defaulting to 'incorrect'")
-            result = "incorrect"
+        # Create a span for this evaluation
+        if log_to_phoenix:
+            with create_span("tool_call_evaluation", {
+                "question": row["question"],
+                "tool_call": row["tool_call"]
+            }) as span:
+                # Store the span ID for Phoenix logging
+                span_id = span.get_span_context().span_id
+                span_ids.append(span_id)
+                
+                prompt = TOOL_CALLING_PROMPT_TEMPLATE.format(
+                    question=row["question"],
+                    tool_call=row["tool_call"],
+                    tool_definitions=json_tools
+                )
+                
+                response = evaluator.invoke(prompt)
+                result = response.content.strip().lower()
+                
+                # Validate response
+                if result not in ["correct", "incorrect"]:
+                    print(f"Warning: Invalid evaluation result: {result}, defaulting to 'incorrect'")
+                    result = "incorrect"
+                    
+                # Set span attributes
+                span.set_attribute("evaluation_result", result)
+                span.set_attribute("is_correct", result == "correct")
+        else:
+            # Generate a random span ID if not using Phoenix
+            span_id = format(uuid.uuid4().int & 0xFFFFFFFFFFFFFFFF, 'x')
+            span_ids.append(span_id)
             
+            prompt = TOOL_CALLING_PROMPT_TEMPLATE.format(
+                question=row["question"],
+                tool_call=row["tool_call"],
+                tool_definitions=json_tools
+            )
+            
+            response = evaluator.invoke(prompt)
+            result = response.content.strip().lower()
+            
+            # Validate response
+            if result not in ["correct", "incorrect"]:
+                print(f"Warning: Invalid evaluation result: {result}, defaulting to 'incorrect'")
+                result = "incorrect"
+        
         results.append({
             "question": row["question"],
             "tool_call": row["tool_call"],
             "evaluation": result,
-            "is_correct": result == "correct"
+            "is_correct": result == "correct",
+            "span_id": span_id
         })
     
     results_df = pd.DataFrame(results)
@@ -153,7 +213,207 @@ def run_tool_calling_evals():
     # Save results to CSV
     results_df.to_csv("evals/tool_calling_eval_results.csv", index=False)
     
+    # Log to Phoenix if enabled
+    if log_to_phoenix:
+        print("Logging evaluation results to Phoenix...")
+        
+        # Create Phoenix evaluation dataframe
+        phoenix_eval_df = pd.DataFrame({
+            "span_id": results_df["span_id"],
+            "label": results_df["evaluation"],
+            "score": results_df["is_correct"].astype(float),
+            "explanation": "Tool call evaluation for question: " + results_df["question"]
+        })
+        
+        # Set span_id as index
+        phoenix_eval_df.set_index("span_id", inplace=True)
+        
+        try:
+            # Allow some time for spans to be sent to Phoenix
+            print("Waiting for spans to be processed...")
+            time.sleep(5)
+            
+            # Log evaluations to Phoenix
+            px.Client().log_evaluations(
+                SpanEvaluations(
+                    dataframe=phoenix_eval_df,
+                    eval_name="Tool Call Accuracy",
+                )
+            )
+            print("Successfully logged evaluations to Phoenix!")
+        except Exception as e:
+            print(f"Error logging to Phoenix: {e}")
+    
+    return results_df
+
+def run_rag_evals(log_to_phoenix=True):
+    """Run RAG relevance evaluations and log to Phoenix."""
+    print("Running RAG relevance evaluations...")
+    
+    # Initialize Phoenix tracer
+    if log_to_phoenix:
+        tracer_provider = initialize_tracer()
+    
+    # Initialize RAG evaluator
+    evaluator = ChatOpenAI(model="gpt-4", temperature=0)
+    
+    # RAG relevance evaluation prompt template
+    RAG_RELEVANCY_PROMPT_TEMPLATE = """
+    You are comparing a reference text to a question and trying to determine if the reference text
+    contains information relevant to answering the question. Here is the data:
+        [BEGIN DATA]
+        ************
+        [Question]: {query}
+        ************
+        [Reference text]: {reference}
+        [END DATA]
+
+    Compare the Question above to the Reference text. You must determine whether the Reference text
+    contains information that can answer the Question. Please focus on whether the very specific
+    question can be answered by the information in the Reference text.
+    Your response must be single word, either "relevant" or "unrelated",
+    and should not contain any text or characters aside from that word.
+    "unrelated" means that the reference text does not contain an answer to the Question.
+    "relevant" means the reference text contains an answer to the Question.
+    """
+    
+    results = []
+    
+    for test_idx, test_case in enumerate(RAG_TEST_CASES):
+        query = test_case["query"]
+        print(f"Evaluating RAG query {test_idx+1}/{len(RAG_TEST_CASES)}: {query}")
+        
+        # Create a span for this RAG query
+        if log_to_phoenix:
+            with create_span("rag_query", {
+                "query": query
+            }) as query_span:
+                query_span_id = query_span.get_span_context().span_id
+                
+                # Evaluate each document for relevance
+                for doc_idx, doc in enumerate(test_case["documents"]):
+                    document_text = doc["content"]
+                    
+                    # Create a sub-span for document evaluation
+                    with create_span("document_evaluation", {
+                        "document_text": document_text,
+                        "document_position": doc_idx
+                    }) as doc_span:
+                        doc_span_id = doc_span.get_span_context().span_id
+                        
+                        # Evaluate relevance
+                        prompt = RAG_RELEVANCY_PROMPT_TEMPLATE.format(
+                            query=query,
+                            reference=document_text
+                        )
+                        
+                        response = evaluator.invoke(prompt)
+                        result = response.content.strip().lower()
+                        
+                        # Validate response
+                        if result not in ["relevant", "unrelated"]:
+                            print(f"Warning: Invalid evaluation result: {result}, defaulting to 'unrelated'")
+                            result = "unrelated"
+                        
+                        # Set span attributes
+                        doc_span.set_attribute("evaluation_result", result)
+                        doc_span.set_attribute("is_relevant", result == "relevant")
+                        doc_span.set_attribute("expected_relevance", doc["expected_relevance"])
+                        
+                        # Record result
+                        results.append({
+                            "query": query,
+                            "document_text": document_text,
+                            "evaluation": result,
+                            "expected_relevance": doc["expected_relevance"],
+                            "is_correct": result == doc["expected_relevance"],
+                            "span_id": query_span_id,
+                            "document_position": doc_idx
+                        })
+        else:
+            # Generate a random span ID if not using Phoenix
+            query_span_id = format(uuid.uuid4().int & 0xFFFFFFFFFFFFFFFF, 'x')
+            
+            # Evaluate each document for relevance
+            for doc_idx, doc in enumerate(test_case["documents"]):
+                document_text = doc["content"]
+                
+                # Evaluate relevance
+                prompt = RAG_RELEVANCY_PROMPT_TEMPLATE.format(
+                    query=query,
+                    reference=document_text
+                )
+                
+                response = evaluator.invoke(prompt)
+                result = response.content.strip().lower()
+                
+                # Validate response
+                if result not in ["relevant", "unrelated"]:
+                    print(f"Warning: Invalid evaluation result: {result}, defaulting to 'unrelated'")
+                    result = "unrelated"
+                
+                # Record result
+                results.append({
+                    "query": query,
+                    "document_text": document_text,
+                    "evaluation": result,
+                    "expected_relevance": doc["expected_relevance"],
+                    "is_correct": result == doc["expected_relevance"],
+                    "span_id": query_span_id,
+                    "document_position": doc_idx
+                })
+    
+    results_df = pd.DataFrame(results)
+    
+    # Calculate and print results
+    correct_count = results_df["is_correct"].sum()
+    total = len(results_df)
+    accuracy = correct_count / total if total > 0 else 0
+    
+    print(f"RAG relevance accuracy: {accuracy:.2%} ({correct_count}/{total})")
+    print("Detailed results:")
+    print(results_df[["query", "document_position", "evaluation", "expected_relevance"]].to_string())
+    
+    # Save results to CSV
+    results_df.to_csv("evals/rag_eval_results.csv", index=False)
+    
+    # Log to Phoenix if enabled
+    if log_to_phoenix:
+        print("Logging RAG evaluation results to Phoenix...")
+        
+        # Create Phoenix document evaluation dataframe
+        phoenix_doc_df = pd.DataFrame({
+            "span_id": results_df["span_id"],
+            "document_position": results_df["document_position"],
+            "label": results_df["evaluation"],
+            "score": (results_df["evaluation"] == "relevant").astype(float),
+            "explanation": "Document relevance evaluation for query: " + results_df["query"]
+        })
+        
+        # Set multi-index with span_id and document_position
+        phoenix_doc_df = phoenix_doc_df.set_index(["span_id", "document_position"])
+        
+        try:
+            # Allow some time for spans to be processed...
+            print("Waiting for spans to be processed...")
+            time.sleep(5)
+            
+            # Log document evaluations to Phoenix
+            px.Client().log_evaluations(
+                DocumentEvaluations(
+                    dataframe=phoenix_doc_df,
+                    eval_name="Document Relevance",
+                )
+            )
+            print("Successfully logged RAG evaluations to Phoenix!")
+        except Exception as e:
+            print(f"Error logging to Phoenix: {str(e)}")
+    
     return results_df
 
 if __name__ == "__main__":
-    run_tool_calling_evals() 
+    # Run tool calling evaluations
+    run_tool_calling_evals()
+    
+    # Run RAG evaluations
+    run_rag_evals()

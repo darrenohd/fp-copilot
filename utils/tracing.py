@@ -24,19 +24,27 @@ def initialize_tracer():
     return tracer_provider
 
 @contextmanager
-def create_span(name, attributes=None):
+def create_span(name, attributes=None, parent_context=None):
     """
     Creates a span for tracing using OpenTelemetry.
     
     Args:
         name: The name of the span
         attributes: Optional dictionary of span attributes
+        parent_context: Optional parent span context
         
     Yields:
         The created span
     """
     tracer = trace.get_tracer("feature-positioning-copilot")
-    with tracer.start_as_current_span(name) as span:
+    
+    # Use parent context if provided
+    if parent_context:
+        context_manager = tracer.start_as_current_span(name, context=parent_context)
+    else:
+        context_manager = tracer.start_as_current_span(name)
+    
+    with context_manager as span:
         if attributes:
             for key, value in attributes.items():
                 span.set_attribute(key, value)
