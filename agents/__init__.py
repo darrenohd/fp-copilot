@@ -1,18 +1,11 @@
 """
 Feature Positioning Copilot Agent Module
 
-This module contains all agent implementations for the Feature Positioning Copilot,
-including document processing, web scraping, and positioning analysis.
+This module contains the agent implementation that orchestrates tools and services.
 """
 
-from .base import BaseAgent
-from .document_processor import DocumentProcessor
-from .positioning_agent import PositioningAgent
-from .scraping_agent import ScrapingAgent
+from .router_agent import RouterAgent
 
 __all__ = [
-    'BaseAgent',
-    'DocumentProcessor',
-    'PositioningAgent',
-    'ScrapingAgent',
+    'RouterAgent'
 ]

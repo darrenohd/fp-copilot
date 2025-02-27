@@ -1,16 +1,22 @@
 import streamlit as st
 from dotenv import load_dotenv
-from agents.document_processor import DocumentProcessor
 from utils.vector_store import VectorStoreManager
-from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from agents.positioning_agent import PositioningAgent
-from agents.scraping_agent import ScrapingAgent
-from agents.slack_agent import SlackAgent
-from utils.tracing import initialize_tracer
-from agents.prompts.routing import AGENT_ROUTING_PROMPT
-import re
 import os
+import re
+
+# Import services
+from services.document_service import DocumentService
+from services.scraping_service import ScrapingService
+
+# Import tools
+from tools.positioning_tool import PositioningTool
+from tools.scraping_tool import ScrapingTool
+from tools.slack_tool import SlackTool
+from tools.rag_tool import RAGTool
+
+# Import agent
+from agents.router_agent import RouterAgent
 
 load_dotenv()
 
@@ -21,25 +27,33 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize tracer
-tracer_provider = initialize_tracer()
+# Initialize tracer is now done in RouterAgent
 
 st.title("Feature Positioning Copilot")
 
-# Initialize components
+# Initialize services
 vector_store = VectorStoreManager.initialize()
-document_processor = DocumentProcessor(vector_store)
+document_service = DocumentService(vector_store)
+scraping_service = ScrapingService()
 
-# Initialize agents
-positioning_agent = PositioningAgent(vector_store)
-scraping_agent = ScrapingAgent(vector_store)
-slack_agent = SlackAgent()  # Create the SlackAgent
+# Initialize tools
+positioning_tool = PositioningTool(vector_store)
+scraping_tool = ScrapingTool(scraping_service, document_service)
+slack_tool = SlackTool()
+rag_tool = RAGTool(vector_store)
+
+# Create the agent with all tools (tracing is initialized within RouterAgent)
+router_agent = RouterAgent(
+    tools=[positioning_tool, scraping_tool, slack_tool, rag_tool],
+    model="gpt-4"
+)
 
 # Initialize session states
 if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.current_analysis = None
     st.session_state.show_examples = True
+    st.session_state.chat_history = []
 
 # Add helper text in main area
 st.markdown("""
@@ -52,125 +66,64 @@ Here's what you can do:
 4. 📊 Share insights to Slack
 """)
 
-# Sidebar for document uploads
+# Sidebar for document upload
 with st.sidebar:
-    st.header("📚 Context Hub")
+    st.header("Context Hub")
+    st.markdown("Upload documents to improve FPC's understanding of your product.")
     
-    # Feature Information Section
-    with st.expander("Feature Information", expanded=True):
-        st.subheader("Basic Details")
-        feature_name = st.text_input("Feature Name", key="feature_name")
-        release_date = st.date_input("Target Release Date", key="release_date")
-        
-        if all([feature_name, release_date]):
-            st.session_state.feature_info = {
-                "name": feature_name,
-                "release_date": release_date
-            }
+    # Requirements upload
+    with st.expander("Upload Product Requirements"):
+        requirements_file = st.file_uploader("Upload PRD", type=["pdf", "txt"], key="requirements")
+        if requirements_file is not None:
+            if st.button("Process Requirements"):
+                with st.spinner("Processing requirements document..."):
+                    success = document_service.process_file(requirements_file, "requirements")
+                    if success:
+                        st.success("✅ Requirements processed successfully!")
+                    else:
+                        st.error("❌ Error processing requirements.")
     
-    # Requirements Section
-    with st.expander("Requirements", expanded=False):
-        st.subheader("Product Requirements")
-        requirements_file = st.file_uploader("Upload Product Requirements", type=['txt', 'pdf'], key="req_upload")
-        if requirements_file and st.button("Process Requirements", key="req_button"):
-            with st.spinner("Processing requirements document..."):
-                document_processor.process_file(requirements_file, "requirements")
-                st.success("Requirements processed!")
+    # User interviews upload
+    with st.expander("Upload User Research"):
+        interviews_file = st.file_uploader("Upload Interviews", type=["pdf", "txt"], key="interviews")
+        if interviews_file is not None:
+            if st.button("Process Interviews"):
+                with st.spinner("Processing user interviews..."):
+                    success = document_service.process_file(interviews_file, "interviews")
+                    if success:
+                        st.success("✅ User interviews processed successfully!")
+                    else:
+                        st.error("❌ Error processing interviews.")
     
-    # User Interviews Section
-    with st.expander("User Research", expanded=False):
-        st.subheader("User Interviews")
-        interviews_file = st.file_uploader("Upload User Interviews", type=['txt', 'pdf'], key="int_upload")
-        if interviews_file and st.button("Process Interviews", key="int_button"):
-            with st.spinner("Processing interviews..."):
-                document_processor.process_file(interviews_file, "interviews")
-                st.success("Interviews processed!")
-    
-    # Competitor Analysis Section
-    with st.expander("Competitor Analysis", expanded=False):
-        st.subheader("Competitor URLs")
-        competitor_url = st.text_input("Enter competitor URL")
-        if competitor_url and st.button("Analyze Competitor", key="comp_button"):
-            with st.spinner("Analyzing competitor..."):
-                analysis = scraping_agent.execute(competitor_url)
-                if isinstance(analysis, str):
-                    st.error(analysis)
-                else:
-                    document_processor.process_competitor(analysis)
-                    st.success("Competitor analyzed and stored!")
+    # Competitor analysis
+    with st.expander("Analyze Competitor Website"):
+        competitor_url = st.text_input("Competitor URL", placeholder="https://example.com/product")
+        if st.button("Analyze Competitor") and competitor_url:
+            with st.spinner("Analyzing competitor website..."):
+                response = scraping_tool._run(competitor_url)
+                st.write(response)
 
 # Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Only show example buttons if no messages yet
-if st.session_state.show_examples and len(st.session_state.messages) == 0:
-    st.write("Try these example questions:")
-    container = st.container()
-    with container:
-        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
-        with col1:
-            if st.button("Generate a positioning statement", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": "Generate a positioning statement for our product"})
-                with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
-                        positioning = positioning_agent.execute()
-                        st.markdown(positioning)
-                st.session_state.messages.append({"role": "assistant", "content": positioning})
-                st.session_state.show_examples = False
-                st.rerun()
-
 # Chat input at the bottom
 if prompt := st.chat_input("Ask me anything about the analyzed products and documents"):
+    # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Display assistant response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            # Determine which agent to use
-            routing_prompt = AGENT_ROUTING_PROMPT.format(user_request=prompt)
-            router = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-            agent_to_use = router.invoke(routing_prompt).content.strip()
-            
-            # Route to appropriate agent
-            if agent_to_use == "SlackAgent" or "share to slack" in prompt.lower():
-                if len(st.session_state.messages) > 1:
-                    last_message = st.session_state.messages[-2]["content"]
-                    success, message = slack_agent.execute(last_message)
-                    response = "✅ " + message if success else "❌ " + message
-                else:
-                    response = "❌ No previous message to share!"
-            elif agent_to_use == "PositioningAgent":
-                positioning = positioning_agent.execute()
-                response = positioning
-            elif agent_to_use == "ScrapingAgent":
-                # Extract URL from prompt
-                url_match = re.search(r'https?://[^\s]+', prompt)
-                if url_match:
-                    url = url_match.group(0)
-                    product_data = scraping_agent.execute(url)
-                    if product_data:
-                        response = f"✅ Successfully analyzed {url}. Here's what I found:\n\n"
-                        response += f"**Product**: {product_data['name']}\n"
-                        response += f"**Description**: {product_data['description']}\n"
-                        response += f"**Pain Points**: {', '.join(product_data['pain_points'])}\n"
-                        response += f"**Pricing**: {product_data['pricing']}\n"
-                        response += f"**Target Audience**: {product_data['target_audience']}\n"
-                    else:
-                        response = f"❌ Failed to analyze {url}. Please try again with a different URL."
-                else:
-                    response = "Please provide a URL to analyze."
-            else:  # RAG
-                results = vector_store.similarity_search(prompt, k=5)
-                context = "\n".join([doc.page_content for doc in results])
-                system_prompt = """You are a helpful product analysis assistant. Using the provided context, answer the user's question clearly and concisely. 
-                If the information is not available in the context, say so. Format your response using markdown for better readability."""
-                
-                human_prompt = f"Context from knowledge base:\n{context}\n\nUser question: {prompt}"
-                messages = [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=human_prompt)
-                ]
-                response = ChatOpenAI(model="gpt-4", temperature=0.7).invoke(messages).content
-            
-            st.markdown(response)
-        st.session_state.messages.append({"role": "assistant", "content": response}) 
+            response = router_agent.execute(prompt, st.session_state.chat_history)
+            st.markdown(response["output"])
+    
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": response["output"]})
+    st.session_state.chat_history.append({"role": "assistant", "content": response["output"]}) 

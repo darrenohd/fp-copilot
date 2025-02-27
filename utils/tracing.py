@@ -2,16 +2,15 @@ import os
 from opentelemetry import trace
 from phoenix.otel import register
 from opentelemetry.trace import Status, StatusCode
-from openinference.instrumentation.openai import OpenAIInstrumentor
+from openinference.instrumentation.langchain import LangChainInstrumentor
+from contextlib import contextmanager
 
 def initialize_tracer():
     # Configure Phoenix tracer
     tracer_provider = register(
         project_name="feature-positioning-copilot",  # Default is 'default'
     )
-    
-    # Initialize OpenAI instrumentation
-    OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+    LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
     
     # Set environment variables for Phoenix if not already set
     if not os.environ.get("PHOENIX_API_KEY"):
@@ -24,23 +23,27 @@ def initialize_tracer():
     
     return tracer_provider
 
-def create_span(name: str, attributes: dict = None):
-    """Create a new span for tracing"""
-    tracer = trace.get_tracer(__name__)
-    span = tracer.start_span(name)
+@contextmanager
+def create_span(name, attributes=None):
+    """
+    Creates a span for tracing using OpenTelemetry.
     
-    if attributes:
-        for key, value in attributes.items():
-            span.set_attribute(key, str(value))
-    
-    return span
-
-def end_span(span, status: str = "success", error: Exception = None):
-    """End a span with status and optional error information"""
-    if status == "success":
-        span.set_status(Status(StatusCode.OK))
-    else:
-        span.set_status(Status(StatusCode.ERROR))
-        if error:
-            span.record_exception(error)
-    span.end() 
+    Args:
+        name: The name of the span
+        attributes: Optional dictionary of span attributes
+        
+    Yields:
+        The created span
+    """
+    tracer = trace.get_tracer("feature-positioning-copilot")
+    with tracer.start_as_current_span(name) as span:
+        if attributes:
+            for key, value in attributes.items():
+                span.set_attribute(key, value)
+        try:
+            yield span
+            span.set_status(Status(StatusCode.OK))
+        except Exception as e:
+            span.set_status(Status(StatusCode.ERROR))
+            span.record_exception(e)
+            raise

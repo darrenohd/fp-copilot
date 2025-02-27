@@ -1,3 +1,8 @@
+"""
+Service for processing various document types and storing them
+in the vector database.
+"""
+
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
@@ -8,44 +13,27 @@ import tempfile
 import os
 from langchain.schema import Document
 from typing import Dict, Any, List, Optional
-from .base import BaseAgent
 from utils.tracing import create_span
 
-class DocumentProcessor(BaseAgent):
+class DocumentService:
     """
-    Agent responsible for processing various document types and storing them
+    Service responsible for processing various document types and storing them
     in the vector database.
     """
     
-    def __init__(self, vector_store, model: str = "gpt-4", temperature: float = 0.7):
+    def __init__(self, vector_store):
         """
-        Initialize the document processor.
+        Initialize the document service.
         
         Args:
             vector_store: The vector store to use for document storage
-            model: The LLM model to use
-            temperature: The temperature parameter for the LLM
         """
-        super().__init__(model, temperature)
         self.vector_store = vector_store
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
         )
     
-    def execute(self, uploaded_file, doc_type: str) -> bool:
-        """
-        Process a document file and store it in the vector database.
-        
-        Args:
-            uploaded_file: The file to process
-            doc_type: The type of document ('requirements', 'interviews', 'strategy')
-            
-        Returns:
-            True if processing was successful, False otherwise
-        """
-        return self.process_file(uploaded_file, doc_type)
-        
     def process_file(self, uploaded_file, doc_type: str) -> bool:
         """
         Process a document file and store it in the vector database.
@@ -85,7 +73,7 @@ class DocumentProcessor(BaseAgent):
             except Exception as e:
                 span.set_attribute("success", False)
                 span.set_attribute("error", str(e))
-                self._handle_error(f"Error processing file: {str(e)}")
+                print(f"Error processing file: {str(e)}")
                 return False
             finally:
                 try:
@@ -157,12 +145,20 @@ class DocumentProcessor(BaseAgent):
                 
                 # Split and store in vector database
                 split_docs = self.text_splitter.split_documents([doc])
-                self.vector_store.add_documents(documents=split_docs)
+                
+                # Add separate span for embeddings
+                with create_span("create_embeddings", {
+                    "doc_type": "competitor",
+                    "competitor": competitor_data.get('name', 'unknown'),
+                    "chunk_count": len(split_docs)
+                }) as embed_span:
+                    self.vector_store.add_documents(documents=split_docs)
+                    embed_span.set_attribute("success", True)
                 
                 span.set_attribute("success", True)
                 return True
             except Exception as e:
                 span.set_attribute("success", False)
                 span.set_attribute("error", str(e))
-                self._handle_error(f"Error processing competitor data: {str(e)}")
+                print(f"Error processing competitor data: {str(e)}")
                 return False 
